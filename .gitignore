@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+
+base_dados/
+base_antiga/
+_xlsx_xml/
+
+docs/*.pdf
+
+output/
+bansal.xlsx
+solucoes.xlsx

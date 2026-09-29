@@ -46,7 +46,7 @@ def _leiame(ws):
     ws.title = "Leia-me"
     textos = [
         "Replicação de Bansal, Kumar, Mehra e Gulati (2022), Omega 107:102538.",
-        "Contas: saldos do IF.data (conglomerado financeiro). Fluxos da DRE somam junho e dezembro, porque a DRE é acumulada no semestre.",
+        "Contas: saldos do IF.data (conglomerado financeiro). Fluxos da DRE somam junho e dezembro, porque a DRE é acumulada no semestre. Se o código do conglomerado começa no meio da janela, os semestres anteriores vêm do CNPJ do banco comercial, quando o ativo total varia no máximo 15% na troca.",
         "Descricao: nome e descrição de cada conta no dicionário do IF.data. A coluna da descrição é a fórmula do COSIF (Plano Contábil das Instituições do Sistema Financeiro Nacional). O nome de cada conta COSIF está na coluna ao lado e na tabela abaixo.",
         "Deflator: SGS 1211 (deflator implícito do PIB), índice com 2024 = 1, montado por fórmula a partir da variação anual.",
         "Agencias: soma de AGEN_PROCESSADAS da ESTBAN por conglomerado financeiro (dezembro).",

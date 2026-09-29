@@ -20,6 +20,9 @@ DB_BANSAL = PASTA_DB / "base_dados.db"
 TIPO = 2
 ANO_REF = "202412"
 ANOS = list(range(2014, 2025))
+# Ativo total do CNPJ no último semestre antes do código C, contra o primeiro semestre do C.
+# Abaixo disso a série é a mesma. Acima, o conglomerado junta outras empresas e o código não é encadeado.
+LIMITE_ATIVO = 0.15
 ANO_BASE_PRECOS = 2024
 UNIDADE = 1e6
 UNIDADE_NOME = "R$ milhões de 2024 por agência (trabalho: R$ milhões de 2024, sem normalizar)"
@@ -51,6 +54,9 @@ PARES_SIGLA = (
     ("C0032119", "CCB"),
     ("C0049944", "BTG"),
     ("C0050304", "PINE"),
+    ("C0051626", "CEF"),
+    ("C0051987", "DAYC"),
+    ("C0052230", "SCOT"),
 )
 
 # conta: (relatório, tipo). "saldo" usa dezembro; "fluxo" soma junho e dezembro,
@@ -185,10 +191,105 @@ def com_sigla(df, mapa, obrigatorio=False):
     return out
 
 
+def meses_painel():
+    """Junho e dezembro de cada ano da janela. A DRE usa os dois; o balanço usa dezembro."""
+    return [f"{a}{m}" for a in ANOS for m in ("06", "12")]
+
+
+def codigo_anterior(con, cods):
+    """CNPJ do banco comercial que publicou o tipo 2 até o código C existir.
+
+    O CNPJ entra só se for o único B1 ligado ao conglomerado, a série encostar
+    no semestre anterior e o ativo total (78182) variar no máximo LIMITE_ATIVO.
+    Não soma outras empresas do grupo. Devolve {código C: CNPJ}.
+    """
+    cods = [c for c in cods if c]
+    if not cods:
+        return {}
+    meses = meses_painel()
+    pos = {m: i for i, m in enumerate(meses)}
+    ph = ",".join("?" * len(cods))
+    lig = con.execute(
+        f"""
+        SELECT DISTINCT cod_cong_financeiro, cod_inst
+          FROM cadastro
+         WHERE td = 'I' AND tcb = 'B1' AND cod_cong_financeiro IN ({ph})
+        """,
+        cods,
+    ).fetchall()
+    por_cong = {}
+    for cong, cnpj in lig:
+        por_cong.setdefault(cong, []).append(cnpj)
+    todos = list(dict.fromkeys([*cods, *(cnpj for lista in por_cong.values() for cnpj in lista)]))
+    ph_t = ",".join("?" * len(todos))
+    ph_m = ",".join("?" * len(meses))
+    rows = con.execute(
+        f"""
+        SELECT DISTINCT cod_inst, ano_mes, saldo
+          FROM valores
+         WHERE tipo_instituicao = ? AND num_relatorio = '1' AND conta = '78182'
+           AND cod_inst IN ({ph_t}) AND ano_mes IN ({ph_m})
+        """,
+        [TIPO, *todos, *meses],
+    ).fetchall()
+    ativo = {}
+    for cod, am, saldo in rows:
+        ativo.setdefault((cod, str(am)), set()).add(saldo)
+
+    def valor(cod, am):
+        s = ativo.get((cod, am))
+        if not s or len(s) != 1 or None in s:
+            return None
+        return next(iter(s))
+
+    out = {}
+    for cong in cods:
+        tem = [m for m in meses if valor(cong, m) is not None]
+        if not tem or pos[tem[0]] == 0:
+            continue
+        anterior, primeiro = meses[pos[tem[0]] - 1], tem[0]
+        a_c = valor(cong, primeiro)
+        if a_c is None or a_c == 0:
+            continue
+        escolhido = []
+        for cnpj in por_cong.get(cong, []):
+            a_p = valor(cnpj, anterior)
+            if a_p is None:
+                continue
+            if abs(a_p - a_c) / abs(a_c) <= LIMITE_ATIVO:
+                escolhido.append(cnpj)
+        if len(escolhido) == 1:
+            out[cong] = escolhido[0]
+    repetido = {}
+    for cong, cnpj in out.items():
+        repetido.setdefault(cnpj, []).append(cong)
+    return {cong: cnpj for cong, cnpj in out.items() if len(repetido[cnpj]) == 1}
+
+
+def _encadear(df, preds):
+    """Copia o saldo do CNPJ para o código C nos meses em que o C ainda não tem a conta."""
+    if df.empty or not preds:
+        return df
+    pred_cods = set(preds.values())
+    ant = df[df["cod_inst"].isin(pred_cods)].copy()
+    base = df[~df["cod_inst"].isin(pred_cods)].copy()
+    if ant.empty:
+        return base
+    ant["cod_inst"] = ant["cod_inst"].map({p: c for c, p in preds.items()})
+    chaves = set(zip(base["cod_inst"], base["ano_mes"], base["conta"]))
+    manter = [(c, a, k) not in chaves for c, a, k in zip(ant["cod_inst"], ant["ano_mes"], ant["conta"])]
+    return pd.concat([base, ant.loc[manter]], ignore_index=True)
+
+
 def extrair_contas(con, cods, com_log=False):
-    """Saldos de junho e dezembro das contas do de-para, sem duplicatas."""
-    meses = [f"{a}{m}" for a in ANOS for m in ("06", "12")]
-    ph_c = ",".join("?" * len(cods))
+    """Saldos de junho e dezembro das contas do de-para, sem duplicatas.
+
+    Onde o código C ainda não existia, o saldo vem do CNPJ devolvido por codigo_anterior.
+    """
+    meses = meses_painel()
+    preds = codigo_anterior(con, cods)
+    consulta = list(dict.fromkeys([*cods, *preds.values()]))
+    ph_c = ",".join("?" * len(consulta))
     ph_m = ",".join("?" * len(meses))
     ph_k = ",".join("?" * len(CONTAS))
     df = pd.read_sql_query(
@@ -199,11 +300,12 @@ def extrair_contas(con, cods, com_log=False):
            AND ano_mes IN ({ph_m}) AND conta IN ({ph_k})
         """,
         con,
-        params=[TIPO, *cods, *meses, *CONTAS],
+        params=[TIPO, *consulta, *meses, *CONTAS],
     )
     df["ano_mes"] = df["ano_mes"].astype(str)
     df["num_relatorio"] = df["num_relatorio"].astype(str)
     df = df[df["num_relatorio"] == df["conta"].map(lambda c: CONTAS[c][0])].copy()
+    df = _encadear(df, preds)
     chave = ["cod_inst", "ano_mes", "conta"]
     conflito = df.groupby(chave)["saldo"].nunique()
     conflito = conflito[conflito > 1]
@@ -212,19 +314,22 @@ def extrair_contas(con, cods, com_log=False):
     df = df.drop_duplicates(chave)
     df["ano"] = df["ano_mes"].str[:4].astype(int)
     df["mes"] = df["ano_mes"].str[4:]
-    df, log = zeros_verificados_rel8(con, df, cods)
+    df, log = zeros_verificados_rel8(con, df, cods, preds)
     return (df, log) if com_log else df
 
 
 NIVEIS_SCR = ["23349", "23350", "23351", "23352", "23353", "23354", "23355", "23356", "23357"]
 
 
-def zeros_verificados_rel8(con, df, cods):
+def zeros_verificados_rel8(con, df, cods, preds=None):
     """Nível de risco nulo no relatório 8 vira zero só se AA..H + Total Exterior (23383) fecha o Total Geral (24454).
 
     Sem essa identidade o nulo continua ausente e o banco sai por painel incompleto.
+    Os totais do semestre anterior ao código C vêm do mesmo CNPJ da série encadeada.
     """
-    ph = ",".join("?" * len(cods))
+    preds = preds or {}
+    buscar = list(dict.fromkeys([*cods, *preds.values()]))
+    ph = ",".join("?" * len(buscar))
     meses = [f"{a}12" for a in ANOS]
     tot = pd.read_sql_query(
         f"""
@@ -233,9 +338,10 @@ def zeros_verificados_rel8(con, df, cods):
            AND ano_mes IN ({",".join("?" * len(meses))}) AND conta IN ('23383', '24454')
         """,
         con,
-        params=[TIPO, *cods, *meses],
+        params=[TIPO, *buscar, *meses],
     )
     tot["ano_mes"] = tot["ano_mes"].astype(str)
+    tot = _encadear(tot, preds)
     tot = tot.pivot_table(index=["cod_inst", "ano_mes"], columns="conta", values="saldo", aggfunc="first", dropna=False)
     niv = df[df["conta"].isin(NIVEIS_SCR) & (df["mes"] == "12")]
     soma = niv.groupby(["cod_inst", "ano_mes"])["saldo"].sum(min_count=0)
@@ -271,6 +377,79 @@ def faltas_por_banco(contas, cods):
     return faltas
 
 
+ROTULO_TCB = {
+    "B1": "banco comercial ou múltiplo com carteira comercial",
+    "B2": "banco múltiplo sem carteira comercial",
+    "B3S": "cooperativa",
+    "B3C": "cooperativa",
+    "B4": "banco de desenvolvimento",
+    "N1": "conglomerado não bancário",
+    "N2": "conglomerado não bancário",
+    "n2": "conglomerado não bancário",
+    "N4": "instituição de pagamento",
+}
+
+
+def _mes_extenso(ano_mes):
+    nomes = {"03": "março", "06": "junho", "09": "setembro", "12": "dezembro"}
+    return f"{nomes.get(ano_mes[4:], ano_mes[4:])} de {ano_mes[:4]}"
+
+
+def _lista_anos(anos):
+    anos = list(anos)
+    if not anos:
+        return ""
+    if len(anos) == 1:
+        return anos[0]
+    return ", ".join(anos[:-1]) + " e " + anos[-1]
+
+
+def _primeiro_semestre(con, cod):
+    """Primeiro junho ou dezembro em que o código C tem alguma conta do de-para."""
+    meses = meses_painel()
+    ph_m = ",".join("?" * len(meses))
+    ph_k = ",".join("?" * len(CONTAS))
+    row = con.execute(
+        f"""
+        SELECT MIN(ano_mes) FROM valores
+         WHERE tipo_instituicao = ? AND cod_inst = ?
+           AND ano_mes IN ({ph_m}) AND conta IN ({ph_k})
+        """,
+        [TIPO, cod, *meses, *CONTAS],
+    ).fetchone()
+    return None if row is None or row[0] is None else str(row[0])
+
+
+def motivo_exclusao(con, cod, tcb, miss):
+    """Texto de por que o conglomerado fica fora da amostra."""
+    if tcb != "B1":
+        rotulo = ROTULO_TCB.get(tcb, tcb)
+        return f"tcb {tcb}: {rotulo}. A seção 4.2 usa só banco comercial."
+    contas = {x.split(":")[1] for x in miss}
+    if contas and contas <= set(NIVEIS_SCR):
+        anos = _lista_anos(sorted({x[:4] for x in miss}))
+        return ("Falta a carteira do SCR (relatório 8, níveis AA a H) nos anos "
+                f"{anos}. Sem ela não há NPL nem crédito adimplente.")
+    por_ano = {}
+    for x in miss:
+        por_ano.setdefault(x[:4], []).append(x)
+    cheios = [a for a in sorted(por_ano) if len(por_ano[a]) >= 36]
+    parciais = [a for a in sorted(por_ano) if len(por_ano[a]) < 36]
+    primeiro = _primeiro_semestre(con, cod)
+    partes = []
+    if primeiro and primeiro != meses_painel()[0]:
+        partes.append(f"o código do conglomerado começa em {_mes_extenso(primeiro)}")
+    if cheios:
+        partes.append(f"faltam os anos {_lista_anos(cheios)}")
+    if parciais:
+        partes.append(f"em {_lista_anos(parciais)} falta só parte dos saldos")
+    frases = [p[:1].upper() + p[1:] for p in partes if p]
+    if primeiro and primeiro != meses_painel()[0]:
+        frases.append("O período anterior não é encadeado: o saldo não é o do banco comercial "
+                      f"cujo ativo total varia no máximo {LIMITE_ATIVO:.0%} na troca")
+    return ". ".join(frases) + "."
+
+
 def amostra(con):
     """Candidatos S1 a S3 de 202412 e o motivo de cada exclusão (seção 4.2 e L7)."""
     cand = pd.read_sql_query(
@@ -286,17 +465,17 @@ def amostra(con):
     )
     cand["tc"] = cand["tc"].astype(str)
     cand["grupo"] = cand["tc"].map(GRUPOS)
+    preds = codigo_anterior(con, list(cand["cod_inst"]))
+    cand["cnpj_anterior"] = cand["cod_inst"].map(lambda c: preds.get(c, ""))
     faltas = faltas_por_banco(extrair_contas(con, list(cand["cod_inst"])), list(cand["cod_inst"]))
     status, motivo = [], []
     for r in cand.itertuples():
         if r.tcb != "B1":
             status.append("excluído")
-            motivo.append(f"tcb={r.tcb}: não é banco comercial (seção 4.2)")
+            motivo.append(motivo_exclusao(con, r.cod_inst, r.tcb, []))
         elif r.cod_inst in faltas:
-            miss = faltas[r.cod_inst]
-            anos = sorted({x[:4] for x in miss})
             status.append("excluído")
-            motivo.append(f"painel incompleto: {len(miss)} saldos ausentes nos anos {', '.join(anos)}")
+            motivo.append(motivo_exclusao(con, r.cod_inst, r.tcb, faltas[r.cod_inst]))
         else:
             status.append("incluído")
             motivo.append("")
@@ -430,6 +609,7 @@ def baixar_estban(con_b, anos=None, progresso=None):
 def agencias(con, con_b, cods):
     """Agências por conglomerado e ano: soma dos CNPJs ligados pelo cod_cong_financeiro de dezembro.
 
+    Nos anos em que o código C ainda não tinha membro no cadastro, entra o CNPJ de codigo_anterior.
     CNPJ com zero agência processada entra com 1. Um banco não opera com zero agência, e o zero
     da ESTBAN é defeito do arquivo (decisão do usuário).
     """
@@ -448,6 +628,19 @@ def agencias(con, con_b, cods):
         params=[*cods, *meses],
     )
     cad["ano"] = cad["ano_mes"].astype(str).str[:4].astype(int)
+    preds = codigo_anterior(con, cods)
+    if preds:
+        anos_com = {}
+        for cong, ano in zip(cad["cod_inst"], cad["ano"]):
+            anos_com.setdefault(cong, set()).add(int(ano))
+        extra = [
+            {"ano_mes": f"{ano}12", "cnpj": cnpj, "cod_inst": cong, "ano": ano}
+            for cong, cnpj in preds.items()
+            for ano in ANOS
+            if ano not in anos_com.get(cong, ())
+        ]
+        if extra:
+            cad = pd.concat([cad, pd.DataFrame(extra)], ignore_index=True)
     m = cad.merge(est, on=["ano", "cnpj"], how="inner")
     m["agencias_usadas"] = m["agen_processadas"].where(m["agen_processadas"] > 0, 1)
     agg = m.groupby(["cod_inst", "ano"]).agg(

@@ -133,10 +133,11 @@ digraph G {
 def versao_bansal():
     con_b = pb.abrir_bansal()
     try:
-        return con_b.execute(
+        base = con_b.execute(
             "SELECT (SELECT COUNT(*) || '|' || IFNULL(MAX(baixado_em), '') FROM deflator_pib), "
             "(SELECT COUNT(*) || '|' || IFNULL(MAX(baixado_em), '') FROM estban_controle)"
         ).fetchone()
+        return (*base, pb.LIMITE_ATIVO)
     finally:
         con_b.close()
 
@@ -405,9 +406,11 @@ def bansal_amostra(P):
     c[2].metric("Excluídos", len(amo) - len(inc))
     c[3].metric("Grupos (público / privado / estrangeiro)",
                 " / ".join(str((inc["grupo"] == g).sum()) for g in pb.GRUPOS.values()))
-    st.dataframe(amo[["nome", "sigla", "sr", "grupo", "tcb", "status", "motivo"]],
+    st.dataframe(amo[["nome", "sigla", "sr", "grupo", "tcb", "cnpj_anterior", "status", "motivo"]],
                  hide_index=True, width="stretch")
-    st.caption("tcb: tipo de consolidado bancário (B1 = banco comercial). Perímetro: conglomerado financeiro, cadastro de 202412.")
+    st.caption("tcb: tipo de consolidado bancário (B1 = banco comercial). Perímetro: conglomerado financeiro, cadastro de 202412. "
+               "cnpj_anterior: CNPJ do banco comercial que publicou o conglomerado financeiro até o código C existir, "
+               f"quando o ativo total varia no máximo {pb.LIMITE_ATIVO:.0%} na troca de semestre.")
     with st.expander("Relatório 8 (carteira por nível de risco): nulos convertidos em zero"):
         st.write("Um nível de risco nulo vira zero só se AA a H mais o Total Exterior (23383) fecha o Total Geral (24454). "
                  "Sem essa identidade o nulo continua ausente e o banco sai por painel incompleto.")

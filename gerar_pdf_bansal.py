@@ -228,6 +228,9 @@ def secao2(h):
         ["Banco comercial", "tcb = B1 (seção 4.2: bancos comerciais). Os demais saem com o motivo."],
         ["Painel completo", f"{c('faltas_por_banco')}: o banco sai se faltar qualquer saldo usado em qualquer ano de "
                             f"{pb.ANOS[0]} a {pb.ANOS[-1]}. Nada é preenchido."],
+        ["Código C no meio da janela", f"{c('codigo_anterior')}: o semestre anterior vem do CNPJ do único banco "
+                                       f"comercial (B1) ligado ao conglomerado, se o ativo total (78182) varia no "
+                                       f"máximo {pb.LIMITE_ATIVO:.0%}. Outra empresa do grupo não entra no lugar."],
     ], [3.2 * cm, 13.8 * cm]))
     h.append(p("Grupos de propriedade, como no paper (público e privado), mais o grupo estrangeiro: " +
                ", ".join(f"tc = {k}: {v}" for k, v in pb.GRUPOS.items()) + "."))
@@ -239,6 +242,23 @@ def secao2(h):
     h.append(nota("<b>Adaptação L7 e L8.</b> Painel balanceado com uma fronteira única para todos os bancos da "
                   "amostra, sem fronteiras separadas por grupo. O perímetro, o período e a fonte são brasileiros; o "
                   "paper usa 42 bancos indianos de 2010 a 2017."))
+    h.append(Paragraph("2.1 Quem fica de fora", H2))
+    con = pb.abrir_fonte()
+    try:
+        amo = pb.amostra(con)
+    finally:
+        con.close()
+    fora = amo[amo["status"] != "incluído"].sort_values(["sr", "nome"])
+    s1 = int((fora["sr"] == "S1").sum())
+    frase = (f"O cadastro de {pb.ANO_REF} tem {len(amo)} conglomerados em S1, S2 ou S3. "
+             f"{len(fora)} ficam de fora e {len(amo) - len(fora)} entram.")
+    if s1 == 0:
+        frase += " Nenhum S1 fica de fora."
+    h.append(p(frase + f" O motivo é o de {c('motivo_exclusao')}:"))
+    linhas = [["Segmento", "Banco", "Por quê"]]
+    for r in fora.itertuples():
+        linhas.append([escape(str(r.sr)), escape(str(r.nome)), escape(str(r.motivo))])
+    h.append(tabela(linhas, [2.2 * cm, 4.4 * cm, 10.4 * cm]))
 
 
 def secao3(h, nomes):
@@ -592,6 +612,8 @@ def secao13(h):
          "o IF.data não separa receita e despesa de juros puras"],
         ["Amostra e período (L7, L8, L11)", "painel balanceado brasileiro, 2014 a 2024, fronteira única",
          "fonte e período diferentes do paper"],
+        ["Código C no meio da janela", "semestres anteriores no CNPJ do banco comercial, se o ativo total varia no máximo 15%",
+         "o IF.data passa a publicar o conglomerado financeiro num código C"],
         ["Nulos do relatório 8", "zero só com a identidade de totais", "decisão desta replicação"],
         ["Agências zeradas", "entram com 1", "decisão do usuário"],
         ["Unidade", escape(pb.UNIDADE_NOME), "π e δ = 1 dependem da unidade"],

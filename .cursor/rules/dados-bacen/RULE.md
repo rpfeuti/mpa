@@ -25,3 +25,4 @@ alwaysApply: true
 ## Cadastro
 - Uma linha por instituição por trimestre: o mesmo `cod_inst` em trimestres diferentes é a mesma instituição.
 - `sr` (S1 a S5) vem vazio antes de 2017: escolher a amostra num trimestre recente e aplicar o `cod_inst` ao histórico.
+- Se o código C do conglomerado financeiro começa depois de 2014, os semestres anteriores vêm do CNPJ do banco comercial (B1, tipo 2) ligado a ele, quando esse CNPJ é o único nessa condição e o ativo total varia no máximo 15% na troca de semestre. Não somar outras empresas do grupo para montar o conglomerado.
